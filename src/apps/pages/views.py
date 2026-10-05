@@ -5,7 +5,6 @@ from django.db.models import Q
 from competitions.models import Submission
 from announcements.models import Announcement, NewsPost
 
-from django.conf import settings
 from utils.data import pretty_bytes
 
 
@@ -15,12 +14,8 @@ class HomeView(TemplateView):
     def get_context_data(self, *args, **kwargs):
         context = super().get_context_data(*args, **kwargs)
 
-        announcement = Announcement.objects.all().first()
-        context['announcement'] = announcement.text if announcement else None
-
-        news_posts = NewsPost.objects.all().order_by('-id')
-        context['news_posts'] = news_posts
-        context['CONTACT_EMAIL'] = settings.CONTACT_EMAIL
+        context['announcements'] = Announcement.objects.filter(is_active=True).order_by("priority", "-created_when")
+        context['news_posts'] = NewsPost.objects.all().order_by('-id')
 
         return context
 

@@ -15,7 +15,7 @@ from leaderboards.models import Leaderboard
 from profiles.models import User
 from tasks.models import Task
 
-from api.serializers.queues import QueueSerializer
+from api.serializers.queues import QueueSerializer, QueuePublicSerializer
 from datetime import datetime
 from django.utils.timezone import now
 
@@ -375,16 +375,16 @@ class CompetitionDetailSerializer(serializers.ModelSerializer):
     participant_status = serializers.CharField(read_only=True)
     participants_count = serializers.IntegerField(read_only=True)
     submissions_count = serializers.IntegerField(read_only=True)
-    queue = QueueSerializer(read_only=True)
+    queue = QueuePublicSerializer(read_only=True)
     whitelist_emails = serializers.SerializerMethodField()
 
     class Meta:
         model = Competition
-        fields = (
+        # Fields visible to everyone who can access the competition
+        public_fields = (
             'id',
             'title',
             'published',
-            'secret_key',
             'created_by',
             'owner_display_name',
             'created_when',
@@ -394,31 +394,36 @@ class CompetitionDetailSerializer(serializers.ModelSerializer):
             'pages',
             'phases',
             'leaderboards',
-            'collaborators',
             'participant_status',
-            'registration_auto_approve',
             'description',
             'participants_count',
             'submissions_count',
-            'queue',
-            'enable_detailed_results',
-            'show_detailed_results_in_submission_panel',
-            'show_detailed_results_in_leaderboard',
-            'auto_run_submissions',
-            'can_participants_make_submissions_public',
-            'make_programs_available',
-            'make_input_data_available',
             'docker_image',
             'competition_type',
-            'fact_sheet',
-            'forum',
             'reward',
             'contact_email',
             'report',
-            'whitelist_emails',
+            'enable_detailed_results',
+            'show_detailed_results_in_submission_panel',
+            'show_detailed_results_in_leaderboard',
+            'forum',
             'forum_enabled',
-            'enable_human_in_the_loop'
+            'fact_sheet',
+            'make_programs_available',
+            'make_input_data_available',
+            'registration_auto_approve',
         )
+        # Fields only visible to competition admins (creator, collaborators, staff/superusers)
+        admin_fields = (
+            'secret_key',
+            'whitelist_emails',
+            'collaborators',
+            'queue',
+            'auto_run_submissions',
+            'enable_human_in_the_loop',
+            'can_participants_make_submissions_public',
+        )
+        fields = public_fields + admin_fields
 
     def get_leaderboards(self, instance):
         try:
@@ -446,10 +451,11 @@ class CompetitionDetailSerializer(serializers.ModelSerializer):
         representation = super().to_representation(instance)
         user = self.context['request'].user
 
-        # If user is not admin/creator/collaborator then do not include secret_key and whitelist_emails
+        # If user is not admin/creator/collaborator then only include the public fields
         if not instance.user_has_admin_permission(user):
-            representation.pop('secret_key', None)
-            representation.pop('whitelist_emails', None)
+            for field in list(representation):
+                if field not in self.Meta.public_fields:
+                    representation.pop(field)
 
         return representation
 

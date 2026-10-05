@@ -17,9 +17,7 @@ from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.renderers import JSONRenderer
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_csv.renderers import CSVRenderer
-from api.throttling import AnonBurstRateThrottle, UserBurstRateThrottle
 from api.pagination import DynamicChoicePagination, LargePagination
 from api.renderers import ZipRenderer
 from rest_framework.viewsets import ModelViewSet
@@ -45,10 +43,6 @@ class CompetitionViewSet(ModelViewSet):
     queryset = Competition.objects.all()
     permission_classes = (AllowAny,)
     pagination_class = LargePagination
-    # Declared so the `public` action's @action(throttle_scope=...) kwarg passes
-    # ViewSetMixin.as_view()'s hasattr(cls, key) check; ScopedRateThrottle reads it
-    # via getattr(view, 'throttle_scope', None) regardless of this default.
-    throttle_scope = None
 
     def get_queryset(self):
 
@@ -193,7 +187,7 @@ class CompetitionViewSet(ModelViewSet):
         if search_query:
             qs = qs.filter(Q(title__icontains=search_query) | Q(description__icontains=search_query))
 
-        qs = qs.order_by('created_when')
+        qs = qs.order_by('-created_when')
         return qs
 
     def get_permissions(self):
@@ -375,16 +369,16 @@ class CompetitionViewSet(ModelViewSet):
             participant.status = 'approved'
         elif competition.registration_auto_approve:
             participant.status = 'approved'
-            send_participation_accepted_emails(participant)
+            send_participation_accepted_emails(participant, request)
         else:
             # check if user is in whitelist emails then approve directly
             # Using lower case because some users have used uppercased emails addresses
             if user.email.lower() in list(competition.whitelist_emails.values_list('email', flat=True)):
                 participant.status = 'approved'
-                send_participation_accepted_emails(participant)
+                send_participation_accepted_emails(participant, request)
             else:
                 participant.status = 'pending'
-                send_participation_requested_emails(participant)
+                send_participation_requested_emails(participant, request)
 
         participant.save()
         return Response({'participant_status': participant.status}, status=status.HTTP_201_CREATED)
@@ -581,12 +575,7 @@ class CompetitionViewSet(ModelViewSet):
         serializer = CompetitionCreationTaskStatusSerializer({"status": "Success. Competition dump is being created."})
         return Response(serializer.data, status=201)
 
-    @action(
-        detail=False, methods=('GET',),
-        pagination_class=LargePagination,
-        throttle_classes=[ScopedRateThrottle, AnonBurstRateThrottle, UserBurstRateThrottle],
-        throttle_scope='competitions_public',
-    )
+    @action(detail=False, methods=('GET',), pagination_class=LargePagination)
     def public(self, request):
         """
         Retrieve a public list of published competitions with optional filtering and ordering.
@@ -1056,7 +1045,7 @@ class CompetitionParticipantViewSet(ModelViewSet):
                 'denied': send_participation_denied_emails,
             }
             if participation_status in emails:
-                emails[participation_status](participant)
+                emails[participation_status](participant, request)
 
         return super().update(request, *args, **kwargs)
 
