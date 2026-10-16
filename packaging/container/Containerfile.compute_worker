@@ -14,6 +14,7 @@ COPY compute_worker/pyproject.toml compute_worker/uv.lock compute_worker/celery_
 # Install UV and add paths to PATH for uv and the future .venv created by uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && microdnf remove -y tar gzip && microdnf clean all
 ENV PATH=$PATH:/root/.local/bin
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 ENV PATH=$PATH:/.venv/bin
 
 
@@ -21,8 +22,8 @@ ENV PATH=$PATH:/.venv/bin
 RUN uv sync --frozen
 COPY src/settings/logs_loguru.py /.venv/bin
 
-# RUN chmod -R a+rX /.venv
-# USER 1000:1000
+RUN chmod -R a+rX /.venv /opt/uv-python
+USER 1000:1000
 
 
 ENTRYPOINT ["/bin/bash", "-c"]
