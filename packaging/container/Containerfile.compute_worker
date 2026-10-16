@@ -21,8 +21,8 @@ ENV PATH=$PATH:/.venv/bin
 RUN uv sync --frozen
 COPY src/settings/logs_loguru.py /.venv/bin
 
-RUN chmod -R a+rX /.venv
-USER 1000:1000
+# RUN chmod -R a+rX /.venv
+# USER 1000:1000
 
 
 ENTRYPOINT ["/bin/bash", "-c"]
