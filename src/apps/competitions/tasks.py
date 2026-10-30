@@ -4,7 +4,7 @@ import os
 import re
 import traceback
 import zipfile
-from datetime import datetime, timedelta
+from datetime import timedelta
 from io import BytesIO
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -27,7 +27,7 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.files.base import ContentFile
 from django.db import transaction
-from django.db.models import Case, Count, F, OuterRef, Subquery, Value, When
+from django.db.models import Q, OuterRef, Exists
 from django.utils.text import slugify
 from django.utils.timezone import now
 from leaderboards.models import Leaderboard
@@ -123,12 +123,16 @@ MAX_EXECUTION_TIME_LIMIT = int(
 )  # time limit of the default queue
 
 
-def _get_user_group_queues(user, competition):
-    all_user_groups = list(
-        competition.participant_groups.filter(user__pk=user.pk)
-        .select_related("queue")
-        .distinct()
-    )
+def _get_user_group_queues(user, competition, selected_group_ids=None):
+    qs = competition.participant_groups.filter(user__pk=user.pk).select_related("queue").distinct()
+
+    if selected_group_ids is not None:
+
+        qs = qs.filter(
+            Q(is_selectable_by_participant=False) | Q(id__in=selected_group_ids)
+        )
+
+    all_user_groups = list(qs)
 
     if not all_user_groups:
         return []
@@ -288,14 +292,15 @@ def _send_to_compute_worker(submission, is_scoring):
     if is_scoring and hitl_active:
         time_limit = 60 * 60 * 25
 
-    if (
-        submission.phase.competition.queue
-    ):  # if the competition is running on a custom queue, not the default queue
+    if submission.queue is None and submission.phase.competition.queue:
+        # if the competition is running on a custom queue, not the default queue,
+        # and no group-specific queue was already assigned
         submission.queue = submission.phase.competition.queue
         run_args["execution_time_limit"] = (
             submission.phase.execution_time_limit
-        )  # use the competition time limit
+        )
         submission.save(update_fields=["queue"])
+
     if submission.status == Submission.SUBMITTING:
         submission.status = Submission.SUBMITTED
         submission.save(update_fields=["status"])
@@ -341,9 +346,9 @@ def create_detailed_output_file(detail_name, submission):
     return make_url_sassy(new_details.data_file.name, permission="w")
 
 
-def run_submission(submission_pk, tasks=None, is_scoring=False):
+def run_submission(submission_pk, tasks=None, is_scoring=False, group_ids=None):
     task_ids = [t.id for t in tasks] if tasks else None
-    return _run_submission.apply_async((submission_pk, task_ids, is_scoring))
+    return _run_submission.apply_async((submission_pk, task_ids, is_scoring, group_ids))
 
 
 def send_submission_message(submission, data):
@@ -364,7 +369,7 @@ def send_submission_message(submission, data):
 
 
 def send_parent_status(submission):
-    """Helper function we can mock in tests, instead of having to do async mocks"""
+    """Helper function we can mock in tests, instead of having to do async mocks."""
     send_submission_message(submission, {"kind": "status_update", "status": "Running"})
 
 
@@ -374,9 +379,9 @@ def send_child_id(submission, child_id):
 
 
 @app.task(queue="site-worker", soft_time_limit=60)
-def _run_submission(submission_pk, task_pks=None, is_scoring=False):
-    """This function is wrapped so that when we run tests we can run this function not
-    via celery"""
+def _run_submission(submission_pk, task_pks=None, is_scoring=False, group_ids=None):
+    """Function wrapped so that when we run tests we can run this function without
+    via celery."""
     select_models = (
         "phase",
         "phase__competition",
@@ -411,7 +416,6 @@ def _run_submission(submission_pk, task_pks=None, is_scoring=False):
     # ── HITL SECURE (private CW only)
 
     if submission.is_specific_task_re_run:
-        # Should only be one task for a specified task submission
         tasks = Task.objects.filter(pk__in=task_pks)
     elif task_pks is None:
         tasks = submission.phase.tasks.all()
@@ -422,7 +426,7 @@ def _run_submission(submission_pk, task_pks=None, is_scoring=False):
 
     if submission.parent is None and not is_scoring:
         group_queues = _get_user_group_queues(
-            submission.owner, submission.phase.competition
+            submission.owner, submission.phase.competition, selected_group_ids=group_ids
         )
     else:
         group_queues = []
@@ -610,8 +614,15 @@ def create_competition_dump(competition_pk, keys_instead_of_files=False):
         logger.info(f"Finding competition {competition_pk}")
         comp = Competition.objects.get(pk=competition_pk)
         zip_buffer = BytesIO()
-        current_date_time = datetime.today().strftime("%Y-%m-%d %H:%M:%S")
-        zip_name = f"{comp.title}-{current_date_time}.zip"
+        created_when = now()
+        dump_type = "keys" if keys_instead_of_files else "files"
+        # Uploaded file names are truncated to 35 characters (see utils.data.PathWrapper),
+        # so the title only gets the room left after the id, dump type and timestamp
+        zip_suffix = f"{comp.pk}-{dump_type}-{created_when.strftime('%Y%m%d-%H%M')}"
+        title_max_length = max(0, 35 - len(zip_suffix) - 1)
+        title_slug = slugify(comp.title)[:title_max_length].strip("-")
+        zip_name = f"{title_slug}-{zip_suffix}.zip" if title_slug else f"{zip_suffix}.zip"
+        dump_name = f"{title_slug} - competition {comp.pk} (with {dump_type}) - {created_when.strftime('%Y-%m-%d %H:%M:%S')} UTC"
         zip_file = zipfile.ZipFile(zip_buffer, "w")
 
         # -------- Main Competition Details -------
@@ -766,7 +777,7 @@ def create_competition_dump(competition_pk, keys_instead_of_files=False):
                         temp_date = getattr(phase, field)
                         if not temp_date:
                             continue
-                        temp_date = temp_date.strftime("%Y-%m-%d")
+                        temp_date = temp_date.strftime("%Y-%m-%d %H:%M:%S")
                         temp_phase_data[field] = temp_date
                     elif field == "max_submissions_per_person":
                         temp_phase_data["max_submissions"] = getattr(phase, field)
@@ -823,10 +834,9 @@ def create_competition_dump(competition_pk, keys_instead_of_files=False):
         logger.info("Creating ZIP file")
         competition_dump_file = ContentFile(zip_buffer.getvalue())
         logger.info("Creating new Data object with type competition_bundle")
-        bundle_count = CompetitionDump.objects.count() + 1
         temp_dataset_bundle = Data.objects.create(
             created_by=comp.created_by,
-            name=f"{comp.title} Dump #{bundle_count} Created {current_date_time}",
+            name=dump_name,
             type="competition_bundle",
             description="Automatically created competition dump",
             # 'data_file'=,
@@ -855,39 +865,31 @@ def create_competition_dump(competition_pk, keys_instead_of_files=False):
 
 @app.task(queue="site-worker", soft_time_limit=60 * 5)
 def do_phase_migrations():
-    # Update phase statuses
-    previous_subquery = (
-        Phase.objects.filter(competition=OuterRef("competition"), end__lte=now())
-        .order_by("-index")
-        .values("index")[:1]
-    )
+    current_time = now()
 
-    current_subquery = Phase.objects.filter(
-        competition=OuterRef("competition"),
-        start__lte=now(),
-        end__gt=now(),
-    ).values("index")[:1]
+    Phase.objects.filter(end__lte=current_time).update(status=Phase.PREVIOUS)
 
-    next_subquery = (
-        Phase.objects.filter(competition=OuterRef("competition"), start__gt=now())
-        .order_by("index")
-        .values("index")[:1]
-    )
+    Phase.objects.filter(start__lte=current_time).filter(
+        Q(end__isnull=True) | Q(end__gt=current_time)
+    ).update(status=Phase.CURRENT)
 
-    Phase.objects.annotate(
-        previous_index=Subquery(previous_subquery),
-        current_index=Subquery(current_subquery),
-        next_index=Subquery(next_subquery),
-    ).update(
-        status=Case(
-            When(index=F("previous_index"), then=Value(Phase.PREVIOUS)),
-            When(index=F("current_index"), then=Value(Phase.CURRENT)),
-            When(index=F("next_index"), then=Value(Phase.NEXT)),
-            default=None,
-        )
-    )
+    Phase.objects.filter(start__gt=current_time).update(status=Phase.NEXT)
 
-    # Updating Competitions whose phases have finished migrating to `is_migrating=False`
+    pending_submissions = Submission.objects.filter(
+        parent__isnull=True,
+        status=Submission.SUBMITTING,
+        created_by_migration__isnull=False,
+        phase__competition__is_migrating=False,
+        phase__start__lte=now(),
+        has_children=False,
+    ).filter(Q(phase__end__isnull=True) | Q(phase__end__gt=now()))
+
+    for submission in pending_submissions:
+        try:
+            submission.start()
+        except Exception:
+            logger.exception(f"Could not start pending migrated submission {submission.pk}")
+
     completed_statuses = [
         Submission.FINISHED,
         Submission.FAILED,
@@ -895,16 +897,13 @@ def do_phase_migrations():
         Submission.NONE,
     ]
 
-    running_subs_query = (
-        Submission.objects.filter(created_by_migration=OuterRef("pk"))
-        .exclude(status__in=completed_statuses)
-        .values_list("pk")[:1]
-    )
+    running_migrated_subs = Submission.objects.filter(
+        phase__competition=OuterRef("pk"),
+        created_by_migration__isnull=False,
+    ).exclude(status__in=completed_statuses)
 
-    Competition.objects.filter(
-        pk__in=Phase.objects.annotate(running_subs=Count(Subquery(running_subs_query)))
-        .filter(running_subs=0, competition__is_migrating=True, status=Phase.PREVIOUS)
-        .values_list("competition__pk", flat=True)
+    Competition.objects.filter(is_migrating=True).filter(
+        ~Exists(running_migrated_subs)
     ).update(is_migrating=False)
 
     # Checking for new phases to start migrating
@@ -913,7 +912,7 @@ def do_phase_migrations():
         start__lte=now(),
         competition__is_migrating=False,
         has_been_migrated=False,
-    )
+    ).filter(Q(end__isnull=True) | Q(end__gt=now()))
 
     logger.info(f"Checking {len(new_phases)} phases for phase migrations.")
 
@@ -922,24 +921,23 @@ def do_phase_migrations():
 
 
 @app.task(queue="site-worker", soft_time_limit=60 * 5)
-def manual_migration(phase_id):
+def manual_migration(phase_id, destination_phase_id=None):
     try:
         source_phase = Phase.objects.get(id=phase_id)
     except Phase.DoesNotExist:
-        logger.error(
-            f"Could not manually migrate phase with id: {phase_id}. Phase could not be found."
-        )
+        logger.error(f"Could not manually migrate phase with id: {phase_id}. Phase could not be found.")
         return
 
+    competition_phases = source_phase.competition.phases
     try:
-        destination_phase = source_phase.competition.phases.get(
-            index=source_phase.index + 1
-        )
+        if destination_phase_id is not None:
+            destination_phase = competition_phases.get(id=destination_phase_id)
+        else:
+            destination_phase = competition_phases.get(index=source_phase.index + 1)
     except Phase.DoesNotExist:
-        logger.error(
-            f"Could not manually migrate phase with id: {phase_id}. The next phase could not be found."
-        )
+        logger.error(f"Could not manually migrate phase with id: {phase_id}. The destination phase could not be found.")
         return
+
     destination_phase.competition.apply_phase_migration(
         source_phase, destination_phase, force_migration=True
     )

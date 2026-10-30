@@ -495,13 +495,11 @@ def replace_legacy_metadata_command(
     return command
 
 
-def md5(filename):
-    """Given some file return its md5, works well on large files"""
-    hash_md5 = hashlib.md5()
+def file_checksum(filename, algorithm):
+    """Given some file return its md5 or sha256, works well on large files"""
     with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
+        digest = hashlib.file_digest(f, algorithm)
+    return digest.hexdigest()
 
 
 def get_folder_size_in_gb(folder):
@@ -587,7 +585,8 @@ class Run:
         self.bundle_dir = os.path.join(self.root_dir, "bundles")
         self.input_dir = os.path.join(self.root_dir, "input")
         self.output_dir = os.path.join(self.root_dir, "output")
-        self.data_dir = os.path.join(Settings.HOST_DIRECTORY, "data")  # absolute path to data in the host
+        self.data_dir = os.path.join(Settings.BASE_DIR, "data")            # path inside the worker container
+        self.reference_dir = os.path.join(Settings.BASE_DIR, "reference")  # path inside the worker container
         self.logs = {}
 
         # Details for submission
@@ -646,6 +645,8 @@ class Run:
             max_retries=Retry(
                 total=3,
                 backoff_factor=1,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=["PATCH", "GET", "PUT"],
             )
         )
         self.requests_session.mount("http://", adapter)
@@ -846,8 +847,10 @@ class Run:
         try:
             self._update_submission(data)
         except Exception as e:
-            # Always catch exception and never raise error
+            # Re-raise only for terminal statuses so Celery marks the task as failed.
             logger.exception(f"Failed to update submission status to {status}: {e}")
+            if status in ("Finished", "Failed"):
+                raise
 
     def _get_container_image(self, image_name):
         logger.info("Running pull for image: {}".format(image_name))
@@ -1517,7 +1520,7 @@ class Run:
         volumes_host = [
             self._get_host_path(program_dir),
             self._get_host_path(self.output_dir),
-            self.data_dir,
+            self._get_host_path(self.data_dir),
             self._get_host_path(self.root_dir, "submission")
         ]
         volumes_config = {
@@ -1536,6 +1539,10 @@ class Run:
             # Input dir for scoring program
             volumes_host.extend([self._get_host_path(self.input_dir)])
             volumes_config.update({volumes_host[-1]: {"bind": "/app/input"}})
+
+            # Reference data, only for the scoring phase.
+            volumes_host.extend([self._get_host_path(self.reference_dir)])
+            volumes_config.update({volumes_host[-1]: {"bind": "/app/reference", "mode": "ro"}})
 
         # During Ingestion: Add `/app/input_data` to volumes_host and update volumes_config
         if kind == ProgramKind.INGESTION_PROGRAM:
@@ -1712,15 +1719,16 @@ class Run:
                         raise SubmissionException("Can't copy file. Make sure the folder exists and that you are using only one compute worker")
                 else:
                     zip_file = self._get_bundle(url, path, cache=cache_this_bundle)
+                    sha256_checksum = file_checksum(zip_file, "sha256")
+                    logger.info(f"{path} has a SHA256 checksum of {sha256_checksum}")
 
                 # Computing checksum of the submission file during ingestion run
                 if url == self.submission_data and not self.is_scoring:
                     # We want to get a checksum of submissions so we can check if they are
                     # a solution, or maybe match them against other submissions later
-                    logger.info(f"Beginning MD5 checksum of submission: {zip_file}")
-                    checksum = md5(zip_file)
-                    logger.info(f"Checksum result: {checksum}")
-                    self._update_submission({"md5": checksum})
+                    md5_checksum = file_checksum(zip_file, "md5")
+                    logger.info(f"{path} has a MD5 checksum of {md5_checksum}")
+                    self._update_submission({"md5": md5_checksum})
 
         # During scoring: copy submission files into "input/res"
         if self.is_scoring:
