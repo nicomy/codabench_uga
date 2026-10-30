@@ -20,7 +20,7 @@ ENV PATH=$PATH:/.venv/bin
 
 # Install dependencies
 RUN uv sync --frozen
-COPY src/settings/logs_loguru.py /.venv/bin
+COPY src/settings/logs_loguru.py /.venv/bin/
 
 RUN chmod -R a+rX /.venv /opt/uv-python
 USER 1000:1000
@@ -28,3 +28,4 @@ USER 1000:1000
 
 ENTRYPOINT ["/bin/bash", "-c"]
 CMD ["celery -A compute_worker worker -l info -Q compute-worker -n compute-worker@$HOSTNAME --concurrency=1"]
+# CMD ["exec /.venv/bin/python -m celery -A compute_worker worker -l info -Q compute-worker -n compute-worker@$HOSTNAME --concurrency=1"]
