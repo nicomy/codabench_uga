@@ -152,12 +152,39 @@ class UserSerializer(ModelSerializer):
             'allow_organization_invite_emails',
         )
 
+        read_only_fields = ('email', 'username')
+
     def get_organizations(self, instance):
         participant_orgs = []
         for org in instance.organizations.all():
             if instance in org.user_record.all():
                 participant_orgs.append(org)
         return OrganizationSerializer(participant_orgs, many=True).data
+
+
+class PublicUserSerializer(ModelSerializer):
+    """
+    What other users can see on a profile page.
+    Why a list of allowed fields: a new field on the user stays private unless it is added here.
+    """
+
+    class Meta:
+        model = User
+        fields = (
+            'username',
+            'photo',
+            'display_name',
+            'first_name',
+            'last_name',
+            'title',
+            'location',
+            'biography',
+            'personal_url',
+            'linkedin_url',
+            'twitter_url',
+            'github_url',
+        )
+        read_only_fields = fields
 
 
 class MembershipSerializer(ModelSerializer):

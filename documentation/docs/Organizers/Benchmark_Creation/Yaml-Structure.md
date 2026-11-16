@@ -31,9 +31,11 @@ For all v2 style competition bundles, be sure to add `version: 2` to the top of 
 - **auto_run_submissions:** a boolean (default: `True`) if set to `False`, organizers have to manually run the submissions of each participant
 - **can_participants_make_submissions_public:** a boolean (default: `True`) if set to `False`, participants cannot make their submissions public from submissions panel.
 - **forum_enabled:** a boolean (default: `True`) if set to `False`, organizers and participants cannot see or interact with competition forum.
- 
-
-
+- <a id="tags"></a>**tags:** Taxonomy tags associated with the competition grouped by category (dictionary mapping category names to lists of tag names). Category names and tag names must match existing entries in the platform taxonomy.
+    - Default categories and tags:
+        - **Machine Learning Domain:** *Algorithms*, *Audio*, *AutoML*, *Computer Vision*, *Generative AI*, *Graphs*, *LLM*, *Multimodal*, *NLP*, *Other*, *Reinforcement Learning*, *Tabular*, *Time Series*
+        - **Fields of Application:** *Agriculture*, *Astronomy*, *Biology*, *Climate*, *Cybersecurity*, *Earth Observation*, *Education*, *Energy*, *Finance*, *E-commerce*, *Healthcare*, *Legal*, *Other*, *Robotics*, *Social Media*, *Sports*, *Transportation*
+        - **Conference:** *ACL*, *CVPR*, *ECCV*, *ECML PKDD*, *ICCV*, *ICLR*, *ICML*, *MICCAI*, *NAACL*, *NeurIPS*, *SemEval*, *WSDM*
 
 ```yaml
 # Required
@@ -56,7 +58,14 @@ reward: $1000 prize pool
 auto_run_submissions: True
 can_participants_make_submissions_public: False
 forum_enabled: True
+tags:
+  Machine Learning Domain:
+    - Reinforcement Learning
+    - Computer Vision
+  Fields of Application:
+    - Robotics
 ```
+
 
 ## Pages
 ### Required
@@ -83,6 +92,12 @@ pages:
 - **index:** Integer for noting the order of phases, Phases _must_ be sequential, without any overlap. If indexes are not supplied, ordering will be assumed by declaration order.
 - **max_submissions:** Total submissions allowed per participant for the entire phase
 - **max_submissions_per_day:** Submission limit for each participant for a given day
+- **max_submissions_scope**(default=participant): Who the `max_submissions` and `max_submissions_per_day` limits apply to. `participant` limits each participant individually. `organization` shares both limits between all members of a participant's organization (team):
+    - A team's usage counts every submission made in the phase by its members, whether or not the submission was made on behalf of the organization.
+    - Membership is evaluated at the time of each submission: all current members (owners, managers, participants and members, but not pending invites) count, including their submissions made before joining the team. A member who leaves the team takes their submissions with them.
+    - A participant belonging to several organizations is blocked as soon as any of these organizations reaches a limit.
+    - Participants who don't belong to any organization keep individual limits.
+    - As with individual limits, failed submissions and submissions re-submitted by organizers do not count.
 - **auto_migrate_to_this_phase:** Cannot be set on the first phase of the competition. This will re-submit all successful submissions from the previous phase to this phase at the time the phase starts.
 - **execution_time_limit:** Execution time limit for submissions, given in seconds. Default is 600.
 - **hide_output:** True/False. If True, stdout/stderr for all submissions to this phase will be hidden from users who are not competition administrators or collaborators.
@@ -109,6 +124,8 @@ phases:
     name: Final Phase
     description: Final testing of your models
     start: 2020-02-02 00:00:00 # Time in UTC+0 and 24-hour format
+    max_submissions: 5
+    max_submissions_scope: organization  # The 5 submissions are shared by each team
     auto_migrate_to_this_phase: True
     accepts_only_result_submissions: False
     tasks:

@@ -9,7 +9,7 @@ from api.serializers.leaderboards import LeaderboardSerializer, ColumnSerializer
 from api.serializers.profiles import CollaboratorSerializer
 from api.serializers.submissions import SubmissionScoreSerializer
 from api.serializers.tasks import PhaseTaskInstanceSerializer
-from competitions.models import Competition, Phase, Page, CompetitionCreationTaskStatus, CompetitionParticipant, CompetitionWhiteListEmail
+from competitions.models import Tag, Competition, Phase, Page, CompetitionCreationTaskStatus, CompetitionParticipant, CompetitionWhiteListEmail
 from forums.models import Forum
 from leaderboards.models import Leaderboard
 from profiles.models import User
@@ -18,6 +18,14 @@ from tasks.models import Task
 from api.serializers.queues import QueueSerializer, QueuePublicSerializer
 from datetime import datetime
 from django.utils.timezone import now
+
+
+class TagSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+
+    class Meta:
+        model = Tag
+        fields = ('id', 'name', 'category', 'category_name')
 
 
 class PhaseSerializer(WritableNestedModelSerializer):
@@ -41,6 +49,7 @@ class PhaseSerializer(WritableNestedModelSerializer):
             'has_max_submissions',
             'max_submissions_per_day',
             'max_submissions_per_person',
+            'max_submissions_scope',
             'auto_migrate_to_this_phase',
             'hide_output',
             'hide_prediction_output',
@@ -126,6 +135,7 @@ class PhaseDetailSerializer(serializers.ModelSerializer):
             'has_max_submissions',
             'max_submissions_per_day',
             'max_submissions_per_person',
+            'max_submissions_scope',
             'auto_migrate_to_this_phase',
             'hide_output',
             'hide_prediction_output',
@@ -183,6 +193,9 @@ class PhaseDetailSerializer(serializers.ModelSerializer):
             # Get user from the request
             user = self.context['request'].user
             if user.is_authenticated:
+                if obj.max_submissions_scope == Phase.ORGANIZATION_SCOPE:
+                    # Show the usage of the user's team closest to its limit
+                    return max(qs.filter(created_when__date=now().date()).count() for _, qs in obj.get_quota_submission_querysets(user))
                 # Get all submissions which are not failed and belongs to this user for this phase
                 qs = obj.submissions.filter(owner=user, parent__isnull=True).exclude(status='Failed')
                 # Count submissions made today
@@ -197,6 +210,9 @@ class PhaseDetailSerializer(serializers.ModelSerializer):
             # Get user from the request
             user = self.context['request'].user
             if user.is_authenticated:
+                if obj.max_submissions_scope == Phase.ORGANIZATION_SCOPE:
+                    # Show the usage of the user's team closest to its limit
+                    return max(qs.count() for _, qs in obj.get_quota_submission_querysets(user))
                 # Get all submissions which are not failed and belongs to this user for this phase
                 qs = obj.submissions.filter(owner=user, parent__isnull=True).exclude(status='Failed')
                 # Count all submissions
@@ -236,6 +252,7 @@ class CompetitionSerializer(DefaultUserCreateMixin, WritableNestedModelSerialize
     phases = PhaseSerializer(many=True)
     collaborators = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), many=True, required=False)
     queue = QueueSerializer(required=False, allow_null=True)
+    tags = serializers.PrimaryKeyRelatedField(queryset=Tag.objects.all(), many=True, required=False)
     # We're using a Base64 image field here so we can send JSON for create/update of this object, if we wanted
     # include the logo as a _file_ then we would need to use FormData _not_ JSON.
     logo = NamedBase64ImageField(required=True, allow_null=True)
@@ -275,7 +292,8 @@ class CompetitionSerializer(DefaultUserCreateMixin, WritableNestedModelSerialize
             'report',
             'whitelist_emails',
             'forum_enabled',
-            'enable_human_in_the_loop'
+            'enable_human_in_the_loop',
+            'tags'
         )
 
     def validate_phases(self, phases):
@@ -380,6 +398,7 @@ class CompetitionDetailSerializer(serializers.ModelSerializer):
     submissions_count = serializers.IntegerField(read_only=True)
     queue = QueuePublicSerializer(read_only=True)
     whitelist_emails = serializers.SerializerMethodField()
+    tags = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
 
     class Meta:
         model = Competition
@@ -415,6 +434,7 @@ class CompetitionDetailSerializer(serializers.ModelSerializer):
             'make_programs_available',
             'make_input_data_available',
             'registration_auto_approve',
+            'tags',
         )
         # Fields only visible to competition admins (creator, collaborators, staff/superusers)
         admin_fields = (
@@ -468,6 +488,7 @@ class CompetitionSerializerSimple(serializers.ModelSerializer):
     owner_display_name = serializers.SerializerMethodField()
     participants_count = serializers.IntegerField(read_only=True)
     first_phase_start = serializers.DateTimeField(read_only=True)
+    tags = serializers.SerializerMethodField()
 
     class Meta:
         model = Competition
@@ -484,6 +505,7 @@ class CompetitionSerializerSimple(serializers.ModelSerializer):
             'logo_icon',
             'description',
             'competition_type',
+            'tags',
             'reward',
             'contact_email',
             'report',
@@ -494,6 +516,20 @@ class CompetitionSerializerSimple(serializers.ModelSerializer):
     def get_created_by(self, obj):
         # Get the user's display name if not None, otherwise return username
         return obj.created_by.display_name if obj.created_by.display_name else obj.created_by.username
+
+    def get_tags(self, obj):
+        if not hasattr(obj, 'prefetched_tags_cached'):
+            obj.prefetched_tags_cached = [
+                {
+                    'id': tag.id,
+                    'name': tag.name,
+                    'category': tag.category.name,
+                    'category_id': tag.category_id,
+                    'color': int(((tag.category_id + 45) * 137.5) % 360),
+                }
+                for tag in obj.tags.all()
+            ]
+        return obj.prefetched_tags_cached
 
     def get_owner_display_name(self, obj):
         # Get the user's display name if not None, otherwise return username
